@@ -8,9 +8,29 @@ import torch
 import pickle
 
 from general_motion_retargeting.utils.lafan1 import load_lafan1_file
+from general_motion_retargeting.utils.soma import detect_soma_bvh, load_soma_bvh_file
 from general_motion_retargeting.kinematics_model import KinematicsModel
 from general_motion_retargeting import GeneralMotionRetargeting as GMR
 from rich import print
+
+
+def load_bvh_motion(bvh_file, bvh_format):
+    if bvh_format == "lafan1":
+        frames, human_height = load_lafan1_file(bvh_file)
+        return frames, human_height, 30, "lafan1"
+
+    if bvh_format == "soma":
+        frames, human_height, motion_fps = load_soma_bvh_file(bvh_file)
+        return frames, human_height, motion_fps, "soma"
+
+    if bvh_format == "auto":
+        if detect_soma_bvh(bvh_file):
+            frames, human_height, motion_fps = load_soma_bvh_file(bvh_file)
+            return frames, human_height, motion_fps, "soma"
+        frames, human_height = load_lafan1_file(bvh_file)
+        return frames, human_height, 30, "lafan1"
+
+    raise ValueError(f"Unsupported bvh_format: {bvh_format}")
 
 
 if __name__ == "__main__":
@@ -33,6 +53,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--robot",
         default="unitree_g1",
+    )
+
+    parser.add_argument(
+        "--bvh_format",
+        choices=["auto", "lafan1", "soma"],
+        default="auto",
+        help="BVH parser to use. 'auto' detects SOMA-style BVH and otherwise falls back to the legacy LAFAN1 parser.",
     )
     
     parser.add_argument(
@@ -73,8 +100,10 @@ if __name__ == "__main__":
             
             # Load LAFAN1 trajectory
             try:
-                lafan1_data_frames, actual_human_height = load_lafan1_file(bvh_file_path)
-                src_fps = 30  # LAFAN1 data is typically 30 FPS
+                bvh_data_frames, actual_human_height, src_fps, detected_format = load_bvh_motion(
+                    bvh_file_path, args.bvh_format
+                )
+                print(f"Using BVH parser for {bvh_file_path}: {detected_format}")
             except Exception as e:
                 print(f"Error loading {bvh_file_path}: {e}")
                 continue
@@ -93,8 +122,8 @@ if __name__ == "__main__":
 
             # retarget to get all qpos
             qpos_list = []
-            for curr_frame in range(len(lafan1_data_frames)):
-                smplx_data = lafan1_data_frames[curr_frame]
+            for curr_frame in range(len(bvh_data_frames)):
+                smplx_data = bvh_data_frames[curr_frame]
                 
                 # Retarget till convergence
                 qpos = retarget.retarget(smplx_data)

@@ -100,12 +100,27 @@ class GeneralMotionRetargeting:
             VELOCITY_LIMITS = {k: 3*np.pi for k in self.robot_motor_names.keys()}
             self.ik_limits.append(mink.VelocityLimit(self.model, VELOCITY_LIMITS)) 
             
+        self.init_qpos = ik_config.get("init_qpos", {})
+        world_rot = ik_config.get("world_rotation", None)
+        if world_rot is not None:
+            self.world_rotation = R.from_quat(world_rot, scalar_first=True)
+        else:
+            self.world_rotation = None
+
         self.setup_retarget_configuration()
-        
+
         self.ground_offset = 0.0
 
     def setup_retarget_configuration(self):
         self.configuration = mink.Configuration(self.model)
+        # Apply initial joint positions from config (e.g. T-pose for V11)
+        if self.init_qpos:
+            for i in range(self.model.njnt):
+                jnt_name = mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_JOINT, i)
+                if jnt_name in self.init_qpos:
+                    qpos_addr = self.model.jnt_qposadr[i]
+                    self.configuration.data.qpos[qpos_addr] = self.init_qpos[jnt_name]
+            mj.mj_forward(self.model, self.configuration.data)
     
         self.tasks1 = []
         self.tasks2 = []
@@ -147,10 +162,22 @@ class GeneralMotionRetargeting:
                 self.task_errors2[task] = []
 
   
+    def apply_world_rotation(self, human_data):
+        """Rotate all BVH world-frame data to align with robot world frame."""
+        if self.world_rotation is None:
+            return human_data
+        rotated = {}
+        for name, (pos, quat) in human_data.items():
+            new_pos = self.world_rotation.apply(pos)
+            new_quat = (self.world_rotation * R.from_quat(quat, scalar_first=True)).as_quat(scalar_first=True)
+            rotated[name] = (new_pos, new_quat)
+        return rotated
+
     def update_targets(self, human_data, offset_to_ground=False):
         # scale human data in local frame
         human_data = self.to_numpy(human_data)
         human_data = self.scale_human_data(human_data, self.human_root_name, self.human_scale_table)
+        human_data = self.apply_world_rotation(human_data)
         human_data = self.offset_human_data(human_data, self.pos_offsets1, self.rot_offsets1)
         human_data = self.apply_ground_offset(human_data)
         if offset_to_ground:
@@ -173,6 +200,16 @@ class GeneralMotionRetargeting:
     def retarget(self, human_data, offset_to_ground=False):
         # Update the task targets
         self.update_targets(human_data, offset_to_ground)
+
+        # Seed the floating base with the human root target so the IK solver
+        # starts close to the solution.  Without this, large orientation
+        # differences between the init pose and the first frame can trap
+        # the solver in a local minimum.
+        if self.human_root_name in self.scaled_human_data:
+            root_pos, root_quat = self.scaled_human_data[self.human_root_name]
+            self.configuration.data.qpos[0:3] = root_pos
+            self.configuration.data.qpos[3:7] = root_quat
+            mj.mj_forward(self.configuration.model, self.configuration.data)
 
         if self.use_ik_match_table1:
             # Solve the IK problem
